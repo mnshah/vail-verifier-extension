@@ -50,3 +50,5 @@ async function run() {
 
 run();
 " >> pkg/run_wasm.js
+
+cp -r web/* pkg/

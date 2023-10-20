@@ -2,6 +2,7 @@
     "name" : "vail-verifier-extension",
     "version" : "1.0",
     "description" : "vail-verifier-extension",
+    "host_permissions": ["https://*.google.com/*", "https://*.googleapis.com/*"],
     "permissions": [],
     "content_scripts": [
         {
@@ -11,6 +12,10 @@
             ]
         }
     ],
+    "background": {
+        "service_worker": "artifact_worker.js",
+        "type":"module"
+    },
     "web_accessible_resources": [{
         "resources": ["vail_verifier_extension_bg.wasm"],
         "matches": ["*://*.example.com/*"]
