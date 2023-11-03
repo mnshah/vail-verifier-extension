@@ -1,6 +1,7 @@
+use js_sys::Uint8Array;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{Request, RequestInit, RequestMode, Response};
+use web_sys::{Request, RequestInit, RequestMode, Response, Headers};
 
 use zkml::{
     model::ModelCircuit,
@@ -34,17 +35,18 @@ use halo2_proofs::{
     PaddedWord,
   };
 
-use std::io::{BufReader, Cursor};
+use std::{io::{BufReader, Cursor}, array};
+use std::convert::TryInto;
 
 #[macro_use]
 mod util;
 
 
-static TEST_VKEY_URL: &str = "https://storage.googleapis.com/project-vail/mnist-2023-10-18/vkey";
-static TEST_PROOF_URL: &str = "https://storage.googleapis.com/project-vail/mnist-2023-10-18/proof";
-static TEST_MODEL_CONFIG_URL: &str = "https://storage.googleapis.com/project-vail/mnist-2023-10-18/config.msgpack";
-static TEST_PUBLIC_VALUES_URL: &str = "https://storage.googleapis.com/project-vail/mnist-2023-10-18/public_vals";
-static TEST_KZG_PARAMS_URL: &str = "https://storage.googleapis.com/project-vail/mnist-2023-10-18/params/15.params";
+static TEST_VKEY_URL: &str = "https://project-vail.storage.googleapis.com/mnist-2023-10-18/vkey";
+static TEST_PROOF_URL: &str = "https://project-vail.storage.googleapis.com/mnist-2023-10-18/proof";
+static TEST_MODEL_CONFIG_URL: &str = "https://project-vail.storage.googleapis.com/mnist-2023-10-18/config.msgpack";
+static TEST_PUBLIC_VALUES_URL: &str = "https://project-vail.storage.googleapis.com/mnist-2023-10-18/public_vals";
+static TEST_KZG_PARAMS_URL: &str = "https://project-vail.storage.googleapis.com/mnist-2023-10-18/params/15.params";
 
 
 #[wasm_bindgen(start)]
@@ -53,51 +55,55 @@ pub async fn main() {
 
     log!("Initializing VAIL Verifier Extension...");
 
-    let vkey = fetch_vkey(TEST_VKEY_URL.to_string()).await.unwrap();
-    let proof = fetch_proof(TEST_PROOF_URL.to_string()).await.unwrap();
-    let config = fetch_model_config(TEST_MODEL_CONFIG_URL.to_string()).await.unwrap();
-    let pub_vals = fetch_public_values(TEST_PUBLIC_VALUES_URL.to_string()).await.unwrap();
-    let kzg_params = fetch_kzg_params(TEST_KZG_PARAMS_URL.to_string()).await.unwrap();
+    let vkey = fetch_bytes_from_url(TEST_VKEY_URL.to_string()).await.unwrap();
+    let proof = fetch_bytes_from_url(TEST_PROOF_URL.to_string()).await.unwrap();
+    let config = fetch_bytes_from_url(TEST_MODEL_CONFIG_URL.to_string()).await.unwrap();
+    let pub_vals = fetch_vec_from_url(TEST_PUBLIC_VALUES_URL.to_string()).await.unwrap();
+    let kzg_params = fetch_bytes_from_url(TEST_KZG_PARAMS_URL.to_string()).await.unwrap();
 
+    log!("Gathered artifacts for verifier...");
 
-    verify_proof_with_kzg(vkey, proof, config,pub_vals, kzg_params);
+    verify_proof_with_kzg(&vkey, &proof, &config,&pub_vals, &kzg_params);
 
 
 }
 
-fn verify_proof_with_kzg(vkey: JsValue, proof: JsValue, config: JsValue, public_vals: Vec<JsValue>, kzg_params: JsValue) {
+fn verify_proof_with_kzg(vkey: &Uint8Array, proof: &Uint8Array, config: &Uint8Array, public_vals: &Vec<Fr>, kzg_params: &Uint8Array) {
     // Deserialize the vkey
-    let decoded_bytes = hex::decode(&vkey.as_string().unwrap()).unwrap();
-    let mut reader = BufReader::new(Cursor::new(decoded_bytes));
+    let mut reader = BufReader::new(Cursor::new(vkey.to_vec()));
     let vk: halo2_proofs::plonk::VerifyingKey<G1Affine> = VerifyingKey::read::<BufReader<Cursor<Vec<u8>>>, ModelCircuit<Fr>>(
       &mut reader,
     SerdeFormat::RawBytes,
     (),
     ).unwrap();
 
+    log!("Deserialized VKey...");
+
     // Deserialize the proof
-    let proof_bytes = hex::decode(&proof.as_string().unwrap()).unwrap();
+    let proof_bytes = proof.to_vec();
+
+    log!("Deserialized Proof...");
 
     // Load the circuit from the config
-    let config_buf = hex::decode(config.as_string().unwrap()).unwrap();
-    let config = rmp_serde::from_slice(&config_buf).unwrap();
-    let circuit = ModelCircuit::<Fr>::generate_from_msgpack(config, false);
+    let config_buf = config.to_vec();
+    let msg_pack_config = rmp_serde::from_slice(&config_buf).unwrap();
+    let circuit = ModelCircuit::<Fr>::generate_from_msgpack(msg_pack_config, false);
 
-    // Load the public values
-    let public_vals: Vec<Fr> = public_vals
-    .iter()
-    .map(|x| Fr::from_str_vartime(x.as_string().unwrap().as_str()).unwrap())
-    .collect();
+    log!("Loaded Circuit...");
 
     // Load the KZG params
-    let decoded_bytes = hex::decode(&kzg_params.as_string().unwrap()).unwrap();
-    let mut reader = BufReader::new(Cursor::new(decoded_bytes));
+    let kzg_bytes = kzg_params.to_vec();
+    let mut reader = BufReader::new(Cursor::new(kzg_bytes));
     let params = ParamsKZG::<Bn256>::read(&mut reader).expect("Failed to read params");
+
+    log!("Loaded KZG Params...");
 
     let strategy = SingleStrategy::new(&params);
     let transcript: Blake2bRead<&[u8], G1Affine, Challenge255<G1Affine>> = Blake2bRead::<_, _, Challenge255<_>>::init(&proof_bytes[..]);
   
     // verify the proof
+    log!("Running verifier...");
+
     verify_kzg(&params, &vk, strategy, &public_vals, transcript)
 
   }
@@ -105,127 +111,55 @@ fn verify_proof_with_kzg(vkey: JsValue, proof: JsValue, config: JsValue, public_
 
 
 
+async fn fetch_bytes_from_url(url: String) -> Result<Uint8Array, JsValue> {
 
-async fn fetch_vkey(vkey_url: String) -> Result<JsValue, JsValue> {
+    log!("Fetching URL: {:?}", &url);
+
     let mut opts = RequestInit::new();
     opts.method("GET");
-    opts.mode(RequestMode::NoCors);
+    opts.mode(RequestMode::Cors);
 
-    let request = Request::new_with_str_and_init(&vkey_url, &opts)?;
-
-    let window = web_sys::window().unwrap();
-    let resp_value = JsFuture::from(window.fetch_with_request(&request)).await?;
-
-    // `resp_value` is a `Response` object.
-    assert!(resp_value.is_instance_of::<Response>());
-    let resp: Response = resp_value.dyn_into().unwrap();
-
-    // Convert this other `Promise` into a rust `Future`.
-    let blob = JsFuture::from(resp.blob()?).await?;
-
-    log!("VKEY: {:?}", &blob);
-
-    // Send the JSON response back to JS.
-    Ok(blob)
-}
-
-async fn fetch_proof(proof_url: String) -> Result<JsValue, JsValue> {
-    let mut opts = RequestInit::new();
-    opts.method("GET");
-    opts.mode(RequestMode::NoCors);
-    let request = Request::new_with_str_and_init(&proof_url, &opts)?;
+    let request = Request::new_with_str_and_init(&url, &opts)?;
 
     let window = web_sys::window().unwrap();
-    let resp_value = JsFuture::from(window.fetch_with_request(&request)).await?;
+    let response = JsFuture::from(window.fetch_with_request(&request)).await?;
 
-    // `resp_value` is a `Response` object.
-    assert!(resp_value.is_instance_of::<Response>());
-    let resp: Response = resp_value.dyn_into().unwrap();
+    assert!(response.is_instance_of::<Response>());
+    assert!(response.has_type::<Response>());
 
-    // Convert this other `Promise` into a rust `Future`.
-    let blob = JsFuture::from(resp.blob()?).await?;
+    let response = response.clone().dyn_into::<Response>().unwrap();
 
-    log!("PROOF: {:?}", &blob);
-
-    // Send the JSON response back to JS.
-    Ok(blob)
+    match response.array_buffer() {
+        Ok(v) => {
+            let val = JsFuture::from(v.clone()).await.unwrap();
+            let array_buf = Uint8Array::new(&val);
+            log!("Response Val: {:?}", &array_buf.length());
+            return Ok(array_buf);
+        },
+        Err(e) => {
+            let err_string = format!("Error fetching url: {:?}", url);
+            return Err(JsValue::from_str(&err_string));
+        }
+    }
 }
 
-async fn fetch_model_config(model_config_url: String) -> Result<JsValue, JsValue> {
-    let mut opts = RequestInit::new();
-    opts.method("GET");
-    opts.mode(RequestMode::NoCors);
-    let request = Request::new_with_str_and_init(&model_config_url, &opts)?;
+async fn fetch_vec_from_url(url: String) -> Result<Vec<Fr>, JsValue> {
+  let array_buf = fetch_bytes_from_url(url).await?;
 
-    let window = web_sys::window().unwrap();
-    let resp_value = JsFuture::from(window.fetch_with_request(&request)).await?;
+  log!("Array Buf: {:?}", array_buf.length());
 
-    // `resp_value` is a `Response` object.
-    assert!(resp_value.is_instance_of::<Response>());
-    let resp: Response = resp_value.dyn_into().unwrap();
+  // Convert Uint8Array to a Vec<u8>
+  let mut data = vec![0; array_buf.length() as usize];
+  array_buf.copy_to(&mut data);
 
-    // Convert this other `Promise` into a rust `Future`.
-    let blob = JsFuture::from(resp.blob()?).await?;
+  log!("Blob: {:?}", data.len());
 
-    log!("MODEL CONFIG: {:?}", &blob);
 
-    // Send the blob response back to JS.
-    Ok(blob)
+  let public_vals: Vec<Fr> = data
+    .chunks(32)
+    .map(|chunk| Fr::from_bytes(chunk.try_into().expect("conversion failed")).unwrap())
+    .collect();
+
+  return Ok(public_vals);
 }
 
-async fn fetch_public_values(public_values_url: String) -> Result<Vec<JsValue>, JsValue> {
-    let mut opts = RequestInit::new();
-    opts.method("GET");
-    opts.mode(RequestMode::NoCors);
-    let request = Request::new_with_str_and_init(&public_values_url, &opts)?;
-
-    let window = web_sys::window().unwrap();
-    let resp_value = JsFuture::from(window.fetch_with_request(&request)).await?;
-
-    // `resp_value` is a `Response` object.
-    assert!(resp_value.is_instance_of::<Response>());
-    let resp: Response = resp_value.dyn_into().unwrap();
-
-    // Convert this other `Promise` into a rust `Future`.
-    let blob = JsFuture::from(resp.blob()?).await?;
-
-    // Create a Uint8Array from the blob
-    let uint8_array = js_sys::Uint8Array::new(&blob);
-
-    log!("Blob: {:?}", blob);
-
-    // Convert Uint8Array to a Vec<u8>
-    let mut data = Vec::with_capacity(uint8_array.length() as usize);
-    uint8_array.copy_to(&mut data);
-
-    // Convert Vec<u8> to a Vec<JsValue>
-    let js_values: Vec<JsValue> = data.into_iter().map(|byte| JsValue::from(byte)).collect();
-
-    log!("PUB PARAMS: {:?}", &js_values);
-
-    Ok(js_values)
-
-}
-
-
-async fn fetch_kzg_params(kzg_params_url: String) -> Result<JsValue, JsValue> {
-    let mut opts = RequestInit::new();
-    opts.method("GET");
-    opts.mode(RequestMode::NoCors);
-    let request = Request::new_with_str_and_init(&kzg_params_url, &opts)?;
-
-    let window = web_sys::window().unwrap();
-    let resp_value = JsFuture::from(window.fetch_with_request(&request)).await?;
-
-    // `resp_value` is a `Response` object.
-    assert!(resp_value.is_instance_of::<Response>());
-    let resp: Response = resp_value.dyn_into().unwrap();
-
-    // Convert this other `Promise` into a rust `Future`.
-    let blob = JsFuture::from(resp.blob()?).await?;
-
-    log!("PUB PARAMS: {:?}", &blob);
-
-    // Send the blob response back to JS.
-    Ok(blob)
-}
