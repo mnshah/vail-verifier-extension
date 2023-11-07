@@ -37,6 +37,7 @@ use halo2_proofs::{
 
 use std::{io::{BufReader, Cursor}, array};
 use std::convert::TryInto;
+use base64::{engine::general_purpose, Engine};
 
 #[macro_use]
 mod util;
@@ -70,7 +71,10 @@ pub async fn main() {
 
 fn verify_proof_with_kzg(vkey: &Uint8Array, proof: &Uint8Array, config: &Uint8Array, public_vals: &Vec<Fr>, kzg_params: &Uint8Array) {
     // Deserialize the vkey
-    let mut reader = BufReader::new(Cursor::new(vkey.to_vec()));
+    let vkey_bytes = vkey.to_vec();
+    log!("vkey_bytes: {:?}", &vkey_bytes.len());
+
+    let mut reader = BufReader::new(Cursor::new(vkey_bytes));
     let vk: halo2_proofs::plonk::VerifyingKey<G1Affine> = VerifyingKey::read::<BufReader<Cursor<Vec<u8>>>, ModelCircuit<Fr>>(
       &mut reader,
     SerdeFormat::RawBytes,
@@ -81,6 +85,7 @@ fn verify_proof_with_kzg(vkey: &Uint8Array, proof: &Uint8Array, config: &Uint8Ar
 
     // Deserialize the proof
     let proof_bytes = proof.to_vec();
+    log!("proof_bytes: {:?}", &proof_bytes.len());
 
     log!("Deserialized Proof...");
 
@@ -93,18 +98,29 @@ fn verify_proof_with_kzg(vkey: &Uint8Array, proof: &Uint8Array, config: &Uint8Ar
 
     // Load the KZG params
     let kzg_bytes = kzg_params.to_vec();
+    log!("kzg_bytes: {:?}", &kzg_bytes.len());
     let mut reader = BufReader::new(Cursor::new(kzg_bytes));
     let params = ParamsKZG::<Bn256>::read(&mut reader).expect("Failed to read params");
 
     log!("Loaded KZG Params...");
 
     let strategy = SingleStrategy::new(&params);
-    let transcript: Blake2bRead<&[u8], G1Affine, Challenge255<G1Affine>> = Blake2bRead::<_, _, Challenge255<_>>::init(&proof_bytes[..]);
+    let mut transcript: Blake2bRead<&[u8], G1Affine, Challenge255<G1Affine>> = Blake2bRead::<_, _, Challenge255<_>>::init(&proof_bytes[..]);
   
     // verify the proof
     log!("Running verifier...");
 
-    verify_kzg(&params, &vk, strategy, &public_vals, transcript)
+    // verify_kzg(&params, &vk, strategy, &public_vals, transcript)
+    match verify_proof::<
+      KZGCommitmentScheme<Bn256>,
+      VerifierSHPLONK<'_, Bn256>,
+      Challenge255<G1Affine>,
+      Blake2bRead<&[u8], G1Affine, Challenge255<G1Affine>>,
+      halo2_proofs::poly::kzg::strategy::SingleStrategy<'_, Bn256>,
+    >(&params, &vk, strategy, &[&[&public_vals]], &mut transcript) {
+      Ok(_) => log!("Proof verified!"),
+      Err(e) => log!("Proof verification failed: {:?}", e),
+    };
 
   }
 
@@ -113,34 +129,32 @@ fn verify_proof_with_kzg(vkey: &Uint8Array, proof: &Uint8Array, config: &Uint8Ar
 
 async fn fetch_bytes_from_url(url: String) -> Result<Uint8Array, JsValue> {
 
-    log!("Fetching URL: {:?}", &url);
+  let mut opts = RequestInit::new();
+  opts.method("GET");
+  opts.mode(RequestMode::Cors);
 
-    let mut opts = RequestInit::new();
-    opts.method("GET");
-    opts.mode(RequestMode::Cors);
+  let request = Request::new_with_str_and_init(&url, &opts)?;
 
-    let request = Request::new_with_str_and_init(&url, &opts)?;
+  let window = web_sys::window().unwrap();
+  let response = JsFuture::from(window.fetch_with_request(&request)).await?;
 
-    let window = web_sys::window().unwrap();
-    let response = JsFuture::from(window.fetch_with_request(&request)).await?;
+  assert!(response.is_instance_of::<Response>());
+  assert!(response.has_type::<Response>());
 
-    assert!(response.is_instance_of::<Response>());
-    assert!(response.has_type::<Response>());
+  let response = response.clone().dyn_into::<Response>().unwrap();
 
-    let response = response.clone().dyn_into::<Response>().unwrap();
-
-    match response.array_buffer() {
-        Ok(v) => {
-            let val = JsFuture::from(v.clone()).await.unwrap();
-            let array_buf = Uint8Array::new(&val);
-            log!("Response Val: {:?}", &array_buf.length());
-            return Ok(array_buf);
-        },
-        Err(e) => {
-            let err_string = format!("Error fetching url: {:?}", url);
-            return Err(JsValue::from_str(&err_string));
-        }
-    }
+  match response.array_buffer() {
+      Ok(v) => {
+          let val = JsFuture::from(v.clone()).await.unwrap();
+          let array_buf = Uint8Array::new(&val);
+          log!("Response Val ({:?}): {:?}", &url, &array_buf.length());
+          return Ok(array_buf);
+      },
+      Err(e) => {
+          let err_string = format!("Error fetching url: {:?}", url);
+          return Err(JsValue::from_str(&err_string));
+      }
+  }
 }
 
 async fn fetch_vec_from_url(url: String) -> Result<Vec<Fr>, JsValue> {
