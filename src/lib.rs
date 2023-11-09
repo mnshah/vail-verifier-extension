@@ -85,6 +85,9 @@ fn verify_proof_with_kzg(vkey: &Uint8Array, proof: &Uint8Array, config: &Uint8Ar
 
     // Deserialize the proof
     let proof_bytes = proof.to_vec();
+
+    let proof_base64 = general_purpose::STANDARD.encode(&proof_bytes);
+    log!("proof_base64: {:?}", &proof_base64);
     log!("proof_bytes: {:?}", &proof_bytes.len());
 
     log!("Deserialized Proof...");
@@ -107,13 +110,15 @@ fn verify_proof_with_kzg(vkey: &Uint8Array, proof: &Uint8Array, config: &Uint8Ar
     let strategy = SingleStrategy::new(&params);
     let mut transcript: Blake2bRead<&[u8], G1Affine, Challenge255<G1Affine>> = Blake2bRead::<_, _, Challenge255<_>>::init(&proof_bytes[..]);
   
+    log!("Transcript: {:?}", &transcript);
+
     // verify the proof
     log!("Running verifier...");
 
     // verify_kzg(&params, &vk, strategy, &public_vals, transcript)
     match verify_proof::<
       KZGCommitmentScheme<Bn256>,
-      VerifierSHPLONK<'_, Bn256>,
+      VerifierSHPLONK<'_, Bn256>, 
       Challenge255<G1Affine>,
       Blake2bRead<&[u8], G1Affine, Challenge255<G1Affine>>,
       halo2_proofs::poly::kzg::strategy::SingleStrategy<'_, Bn256>,
